@@ -75,6 +75,7 @@ class _StationaryVehicleDetectionPageState
       Permission.storage,
     ].request();
   }
+
   Future<void> _initCamera() async {
     try {
       _cameras = await availableCameras();
@@ -98,7 +99,6 @@ class _StationaryVehicleDetectionPageState
       if (mounted) setState(() => _isCameraInitializing = false);
     }
   }
-
   // ============ AUDIO METHODS ============
   Future<void> _playSound(String assetName) async {
     try {
