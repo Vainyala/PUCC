@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:pucc_app/home_screen.dart';
 import 'package:pucc_app/vehicle_detection.dart';
 
 void main() {
@@ -16,7 +17,7 @@ class MyApp extends StatelessWidget {
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
       ),
-      home: StationaryVehicleDetectionPage(),
+      home: HomeScreen(),
     );
   }
 }

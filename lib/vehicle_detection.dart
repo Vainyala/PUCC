@@ -10,6 +10,7 @@ import 'package:path/path.dart' as p;
 import 'package:sensors_plus/sensors_plus.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:geolocator/geolocator.dart';
 
 import 'home_screen.dart';
 
@@ -29,6 +30,13 @@ class _StationaryVehicleDetectionPageState
   final AudioPlayer _audioPlayer = AudioPlayer();
   late final TextRecognizer _textRecognizer;
   final FlutterTts _tts = FlutterTts();
+
+  // GPS Geofence
+  static const double SITE_LATITUDE = 19.289991;
+  static const double SITE_LONGITUDE = 73.058676;
+  static const double GEOFENCE_RADIUS_METERS = 4.0; // 2-4 meters
+  bool _isWithinGeofence = false;
+  bool _isCheckingLocation = false;
 
   // Detection flow state
   String _currentStep = 'initial_countdown';
@@ -93,6 +101,9 @@ class _StationaryVehicleDetectionPageState
     // Wait a bit for permissions to settle
     await Future.delayed(const Duration(milliseconds: 500));
 
+    // Check GPS location
+    await _checkGeofence();
+
     // THEN initialize camera
     await _initCamera();
   }
@@ -101,12 +112,82 @@ class _StationaryVehicleDetectionPageState
     final statuses = await [
       Permission.camera,
       Permission.microphone,
+      Permission.location,
+      Permission.locationWhenInUse,
     ].request();
 
-    return statuses[Permission.camera]?.isGranted == true;
+    return statuses[Permission.camera]?.isGranted == true &&
+        statuses[Permission.location]?.isGranted == true;
+  }
+
+  Future<void> _checkGeofence() async {
+    setState(() {
+      _isCheckingLocation = true;
+      _statusMessage = 'Checking GPS location...';
+    });
+
+    try {
+      // Check GPS permission
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+
+      if (permission == LocationPermission.deniedForever) {
+        debugPrint("❌ GPS permission denied forever");
+        setState(() {
+          _isWithinGeofence = false;
+          _isCheckingLocation = false;
+          _statusMessage = 'GPS permission denied';
+        });
+        return;
+      }
+
+      // Get current location
+      Position position = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+      );
+
+      // Calculate distance from testing site
+      double distance = Geolocator.distanceBetween(
+        SITE_LATITUDE,
+        SITE_LONGITUDE,
+        position.latitude,
+        position.longitude,
+      );
+
+      debugPrint("📍 Distance from site: ${distance.toStringAsFixed(2)}m");
+
+      setState(() {
+        _isWithinGeofence = distance <= GEOFENCE_RADIUS_METERS;
+        _isCheckingLocation = false;
+
+        if (_isWithinGeofence) {
+          debugPrint("✅ Within geofence");
+          _statusMessage = 'Location verified ✅';
+        } else {
+          debugPrint("❌ Outside geofence (${distance.toStringAsFixed(2)}m away)");
+          _statusMessage = 'GPS out of bounds - must be at testing site\n(${distance.toStringAsFixed(1)}m away)';
+        }
+      });
+    } catch (e) {
+      debugPrint("❌ GPS error: $e");
+      setState(() {
+        _isWithinGeofence = false;
+        _isCheckingLocation = false;
+        _statusMessage = 'GPS error: Unable to get location';
+      });
+    }
   }
 
   Future<void> _initCamera() async {
+    if (!_isWithinGeofence) {
+      setState(() {
+        _isCameraInitializing = false;
+      });
+      return;
+    }
+
     try {
       _cameras = await availableCameras();
       if (_cameras == null || _cameras!.isEmpty) {
@@ -173,20 +254,12 @@ class _StationaryVehicleDetectionPageState
       await _audioPlayer.setReleaseMode(ReleaseMode.stop);
       await _audioPlayer.setVolume(1.0);
 
-      // Try playing from assets
       await _audioPlayer.play(AssetSource(assetName));
       debugPrint("🔊 Playing sound: $assetName");
 
-      // Wait for sound to complete
       await Future.delayed(const Duration(milliseconds: 1500));
     } catch (e) {
       debugPrint("❌ Audio error: $e");
-      // If asset fails, try generating a beep tone
-      try {
-        await _audioPlayer.play(AssetSource('$assetName'));
-      } catch (e2) {
-        debugPrint("❌ Audio fallback error: $e2");
-      }
     }
   }
 
@@ -198,7 +271,6 @@ class _StationaryVehicleDetectionPageState
       await _tts.setVolume(1.0);
       await _tts.speak(instruction);
 
-      // Wait for speech to complete
       await Future.delayed(Duration(milliseconds: instruction.length * 80));
     } catch (e) {
       debugPrint("❌ TTS error: $e");
@@ -306,7 +378,6 @@ class _StationaryVehicleDetectionPageState
 
       await Future.delayed(const Duration(seconds: 5));
 
-      // FIRST speak, THEN play sound
       await _speakInstruction("Raising alarm");
       await Future.delayed(const Duration(milliseconds: 500));
       await _playSound("beepSound.mp3");
@@ -603,7 +674,7 @@ class _StationaryVehicleDetectionPageState
               });
             } else {
               timer.cancel();
-              Navigator.of(dialogContext).pop(); // Close dialog
+              Navigator.of(dialogContext).pop();
               Navigator.of(context).pushAndRemoveUntil(
                 MaterialPageRoute(builder: (context) => const HomeScreen()),
                     (Route<dynamic> route) => false,
@@ -618,7 +689,6 @@ class _StationaryVehicleDetectionPageState
             content: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                // 🔷 Header with gradient
                 Container(
                   padding: const EdgeInsets.all(24),
                   decoration: BoxDecoration(
@@ -654,7 +724,6 @@ class _StationaryVehicleDetectionPageState
                   ),
                 ),
 
-                // 🔷 Body content
                 Padding(
                   padding: const EdgeInsets.all(24),
                   child: Column(
@@ -673,7 +742,6 @@ class _StationaryVehicleDetectionPageState
                       ),
                       const SizedBox(height: 20),
 
-                      // ✅ Show mismatch details ONLY if test failed
                       if (_testPassed != true) ...[
                         _buildResultRow('Photo 1:', _regNo1),
                         const SizedBox(height: 8),
@@ -683,7 +751,6 @@ class _StationaryVehicleDetectionPageState
                         const SizedBox(height: 24),
                       ],
 
-                      // ✅ Countdown timer box
                       Container(
                         padding: const EdgeInsets.all(16),
                         decoration: BoxDecoration(
@@ -731,7 +798,6 @@ class _StationaryVehicleDetectionPageState
       ),
     );
   }
-
 
   Widget _buildResultRow(String label, String? value) {
     return Container(
@@ -782,7 +848,7 @@ class _StationaryVehicleDetectionPageState
 
   @override
   Widget build(BuildContext context) {
-    if (_isCameraInitializing) {
+    if (_isCameraInitializing || _isCheckingLocation) {
       return Scaffold(
         body: Container(
           decoration: const BoxDecoration(
@@ -792,15 +858,168 @@ class _StationaryVehicleDetectionPageState
               end: Alignment.bottomRight,
             ),
           ),
-          child: const Center(
+          child: Center(
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                CircularProgressIndicator(color: Colors.white),
-                SizedBox(height: 16),
+                const CircularProgressIndicator(color: Colors.white),
+                const SizedBox(height: 16),
                 Text(
-                  'Initializing Camera...',
-                  style: TextStyle(color: Colors.white, fontSize: 16),
+                  _statusMessage,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.white, fontSize: 16),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    // GPS OUT OF BOUNDS SCREEN
+    if (!_isWithinGeofence) {
+      return Scaffold(
+        body: Container(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              colors: [Color(0xFF1A237E), Color(0xFF3949AB)],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+          ),
+          child: SafeArea(
+            child: Column(
+              children: [
+                // Back button
+                Align(
+                  alignment: Alignment.topLeft,
+                  child: Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: IconButton(
+                      icon: const Icon(Icons.arrow_back, color: Colors.white, size: 28),
+                      onPressed: () => Navigator.pop(context),
+                    ),
+                  ),
+                ),
+
+                // Main content
+                Expanded(
+                  child: Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(32.0),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          // Location error icon
+                          Container(
+                            padding: const EdgeInsets.all(24),
+                            decoration: BoxDecoration(
+                              color: Colors.red.withOpacity(0.2),
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                color: Colors.red,
+                                width: 3,
+                              ),
+                            ),
+                            child: const Icon(
+                              Icons.location_off,
+                              color: Colors.red,
+                              size: 80,
+                            ),
+                          ),
+
+                          const SizedBox(height: 32),
+
+                          // Error message
+                          const Text(
+                            'GPS OUT OF BOUNDS',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 28,
+                              fontWeight: FontWeight.bold,
+                              letterSpacing: 1.5,
+                            ),
+                          ),
+
+                          const SizedBox(height: 16),
+
+                          Text(
+                            _statusMessage,
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              color: Colors.white70,
+                              fontSize: 18,
+                              height: 1.5,
+                            ),
+                          ),
+
+                          const SizedBox(height: 48),
+
+                          // Retry button
+                          ElevatedButton.icon(
+                            onPressed: () async {
+                              await _checkGeofence();
+                              if (_isWithinGeofence) {
+                                await _initCamera();
+                              }
+                            },
+                            icon: const Icon(Icons.refresh),
+                            label: const Text('Check Location Again'),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.white,
+                              foregroundColor: const Color(0xFF1A237E),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 32,
+                                vertical: 16,
+                              ),
+                              textStyle: const TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                              ),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(30),
+                              ),
+                            ),
+                          ),
+
+                          const SizedBox(height: 16),
+
+                          // Info text
+                          Container(
+                            padding: const EdgeInsets.all(16),
+                            margin: const EdgeInsets.only(top: 24),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withOpacity(0.1),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color: Colors.white.withOpacity(0.3),
+                              ),
+                            ),
+                            child: Row(
+                              children: [
+                                const Icon(
+                                  Icons.info_outline,
+                                  color: Colors.white70,
+                                  size: 24,
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Text(
+                                    'You must be within ${GEOFENCE_RADIUS_METERS.toInt()} meters of the testing site to perform vehicle detection.',
+                                    style: const TextStyle(
+                                      color: Colors.white70,
+                                      fontSize: 14,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
                 ),
               ],
             ),
