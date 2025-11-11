@@ -61,7 +61,9 @@ class _StationaryVehicleDetectionPageState
 
   // Result
   bool? _testPassed;
-
+// Add to existing variables section (around line 20-40)
+  Timer? _geofenceMonitorTimer;
+  bool _wasWithinGeofence = true;
   // Result countdown timer
   int _resultCountdown = 10;
   Timer? _resultCountdownTimer;
@@ -82,6 +84,7 @@ class _StationaryVehicleDetectionPageState
     _accelerometerSubscription?.cancel();
     _initialCountdownTimer?.cancel();
     _resultCountdownTimer?.cancel();
+    _geofenceMonitorTimer?.cancel(); // ADD THIS LINE
     _tts.stop();
     super.dispose();
   }
@@ -288,6 +291,9 @@ class _StationaryVehicleDetectionPageState
 
     _speakInstruction("Please dock your device on the tripod");
 
+    // START CONTINUOUS GEOFENCE MONITORING
+    _startGeofenceMonitoring();
+
     _accelerometerSubscription = accelerometerEvents.listen((event) {
       final diffX = (event.x - _lastAccelX).abs();
       final diffY = (event.y - _lastAccelY).abs();
@@ -313,6 +319,78 @@ class _StationaryVehicleDetectionPageState
         }
       }
     });
+  }
+
+  void _startGeofenceMonitoring() {
+    _geofenceMonitorTimer?.cancel();
+
+    _geofenceMonitorTimer = Timer.periodic(const Duration(seconds: 2), (timer) async {
+      if (_currentStep == 'result' || _currentStep == 'initial_countdown') {
+        // Don't monitor during result display or initial countdown
+        return;
+      }
+
+      try {
+        Position position = await Geolocator.getCurrentPosition(
+          desiredAccuracy: LocationAccuracy.high,
+        );
+
+        double distance = Geolocator.distanceBetween(
+          SITE_LATITUDE,
+          SITE_LONGITUDE,
+          position.latitude,
+          position.longitude,
+        );
+
+        bool currentlyInRange = distance <= GEOFENCE_RADIUS_METERS;
+
+        // Check if status changed
+        if (_wasWithinGeofence && !currentlyInRange) {
+          // Moved OUT of range - PAUSE verification
+          debugPrint("❌ LEFT GEOFENCE - PAUSING (${distance.toStringAsFixed(2)}m away)");
+          _pauseVerification(distance);
+        } else if (!_wasWithinGeofence && currentlyInRange) {
+          // Moved BACK into range - RESUME verification
+          debugPrint("✅ BACK IN GEOFENCE - RESUMING");
+          _resumeVerification();
+        }
+
+        _wasWithinGeofence = currentlyInRange;
+
+      } catch (e) {
+        debugPrint("❌ Geofence monitor error: $e");
+      }
+    });
+  }
+
+  void _pauseVerification(double distance) {
+    // Stop all timers
+    _stationaryTimer?.cancel();
+    _initialCountdownTimer?.cancel();
+
+    setState(() {
+      _statusMessage = '⚠️ GPS OUT OF BOUNDS\nMove back to vehicle\n(${distance.toStringAsFixed(1)}m away)';
+      _isStationary = false;
+      _stationarySeconds = 0;
+    });
+
+    _speakInstruction("GPS out of bounds. Please return to vehicle location");
+    _playSound("beepSound.mp3");
+  }
+
+  void _resumeVerification() {
+    setState(() {
+      _statusMessage = '✅ Back in range - Continuing...';
+    });
+
+    _speakInstruction("Back in range. Continuing verification");
+
+    // Resume based on current step
+    if (_currentStep == 'waiting_stationary') {
+      setState(() {
+        _statusMessage = 'Please dock your device on tripod...';
+      });
+    }
   }
 
   void _startStationaryTimer() {
@@ -350,6 +428,29 @@ class _StationaryVehicleDetectionPageState
 
   // ============ CAPTURE SEQUENCE ============
   Future<void> _captureFirstPhoto() async {
+    // CHECK GEOFENCE BEFORE CAPTURE
+    try {
+      Position position = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+      );
+      double distance = Geolocator.distanceBetween(
+        SITE_LATITUDE,
+        SITE_LONGITUDE,
+        position.latitude,
+        position.longitude,
+      );
+
+      if (distance > GEOFENCE_RADIUS_METERS) {
+        debugPrint("❌ Out of geofence before Photo 1 - waiting...");
+        _pauseVerification(distance);
+        // Wait and retry
+        await Future.delayed(const Duration(seconds: 3));
+        return _captureFirstPhoto(); // Retry
+      }
+    } catch (e) {
+      debugPrint("❌ Geofence check error: $e");
+    }
+
     setState(() {
       _currentStep = 'capture1';
       _statusMessage = 'Capturing first photo...';
@@ -840,10 +941,12 @@ class _StationaryVehicleDetectionPageState
       _stationarySeconds = 0;
       _isStationary = false;
       _initialCountdown = 15;
+      _wasWithinGeofence = true;
     });
     _stationaryTimer?.cancel();
     _accelerometerSubscription?.cancel();
     _resultCountdownTimer?.cancel();
+    _geofenceMonitorTimer?.cancel(); // ADD THIS LINE
   }
 
   @override
